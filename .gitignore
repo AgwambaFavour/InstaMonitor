@@ -1,0 +1,6 @@
+monitor.log
+*.log
+downloads/
+__pycache__/
+*.pyc
+session-*

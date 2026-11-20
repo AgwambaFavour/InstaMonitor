@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    "GossipMillNaija",
+    "yabaleftonline",
+    "instablog9ja",
+    "umbra_hq"
+  ],
+  "interval_minutes": 30,
+  "block_cooldown_hours": 6,
+  "login_user": "00cultr",
+  "download_dir": "downloads",
+  "download_existing_on_first_run": false,
+  "download_videos": true,
+  "save_captions": true,
+  "login_browser": "firefox"
+}
