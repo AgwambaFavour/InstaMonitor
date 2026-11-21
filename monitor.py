@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import instaloader
+
+import pipeline
 from instaloader.exceptions import (
     ConnectionException,
     LoginRequiredException,
@@ -245,6 +247,14 @@ def ensure_accounts(cfg):
 def check_account(L, username, state, cfg):
     """Download posts newer than the stored timestamp. Returns number of new posts."""
     profile = instaloader.Profile.from_username(L.context, username)
+    # from_username already has the user id and privacy flag from the profile page.
+    # Skip instaloader's extra profile-details query (doc_id 27937681195819736 on
+    # graphql/query): Instagram now answers it with 400 "feedback_required" even for
+    # healthy accounts. get_posts() itself uses the newer api/graphql endpoint.
+    if profile._node.get("is_private"):
+        log.info("[%s] profile is private; skipping", username)
+        return 0
+    profile._has_full_metadata = True
     last_ts = state.get(username)  # ISO timestamp of newest post seen
     last_dt = datetime.fromisoformat(last_ts) if last_ts else None
 
@@ -276,6 +286,9 @@ def check_account(L, username, state, cfg):
     for post in sorted(new_posts, key=lambda p: p.date_utc):
         log.info("[%s] NEW POST %s  https://instagram.com/p/%s/", username, post.date_utc, post.shortcode)
         L.download_post(post, target=username)
+        stem = post.date_utc.strftime("%Y-%m-%d_%H-%M-%S") + "_UTC"
+        post_dir = BASE / cfg.get("download_dir", "downloads") / username
+        pipeline.process_post(sorted(post_dir.glob(stem + "*")), username, cfg)
         state[username] = post.date_utc.replace(tzinfo=timezone.utc).isoformat()
         save_state(state)
     return len(new_posts)
