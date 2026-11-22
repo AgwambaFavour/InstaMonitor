@@ -38,6 +38,16 @@ import pipeline
 log = logging.getLogger("monitor")
 BASE = Path(__file__).resolve().parent
 
+# ------------------------------------------------------------------ EDIT ME
+# Text written over a censored name that has NO profile picture beside it
+# (e.g. the "@UMBRA_HQ" watermark in the middle of a video).
+#   REPLACEMENT_TEXT = "Manny"        -> writes "Manny"
+#   REPLACEMENT_TEXT = "@uglymannyy"  -> writes "@uglymannyy"
+#   REPLACEMENT_TEXT = ""             -> no text; the replacement image is used instead
+REPLACEMENT_TEXT = "Manny"
+REPLACEMENT_TEXT_COLOR = "black"
+# ---------------------------------------------------------------------------
+
 DEFAULTS = {
     "enabled": False,
     "words": [],                    # words/phrases to hide on screen and in captions
@@ -49,8 +59,8 @@ DEFAULTS = {
     "box_color": "black",
     "fill_color": "white",          # colour painted over each hit, under any replacement image
     "fill_only": [],                # terms that only get the fill, never an image or text
-    "text_replacement": "",         # text written over a matched name that has no profile picture beside it
-    "text_color": "black",
+    "text_replacement": REPLACEMENT_TEXT,  # set at the top of this file
+    "text_color": REPLACEMENT_TEXT_COLOR,
     "caption_mask": "",             # replacement text in captions; "" -> asterisks of same length
     "fuzzy": 0.85,                  # 0-1, how close OCR text must be to a term
     "logo_min_matches": 12,         # SIFT inliers needed to accept a logo hit
