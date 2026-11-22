@@ -54,6 +54,7 @@ DEFAULTS = {
     "sample_fps": 2,                # frames per second scanned for hits
     "max_frames": 90,               # cap on scanned frames (long videos get sparser sampling)
     "pad": 6,                       # pixels added around each hit
+    "cover_avatars": True,          # also cover a round profile picture beside a matched name
     "credit_removal_allowed": [],   # accounts whose credit you have permission to remove
 }
 
@@ -306,10 +307,15 @@ def find(video, account, cfg, workdir):
         logo_list = logo_hits(f, logos, s["logo_min_matches"])
         # OCR often reads the name printed on a logo; the logo hit already covers it.
         texts = [x for x in texts if not any(inside(x["box"], lg["box"]) for lg in logo_list)]
+        gray = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE) if texts and s["cover_avatars"] else None
         for h in texts + logo_list:
             if any(pipeline.overlaps(h["box"], c, pad=2) for c in credits):
                 log.info("Censor: skipped %r at %.1fs - it overlaps the source credit", h["label"], t)
                 continue
+            if gray is not None and h["kind"] == "text":
+                av = avatar_beside(gray, h["box"])
+                if av:
+                    h = dict(h, box=union(h["box"], av))
             for tr in tracks:
                 lt, lb = tr["pts"][-1]
                 if tr["label"] == h["label"] and lt < t and t - lt <= step * 1.6 and near(lb, h["box"]):
@@ -345,6 +351,28 @@ def find(video, account, cfg, workdir):
         x0, y0, x1, y1 = r["box"]
         r["box"] = (max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad))
     return regions
+
+
+def avatar_beside(gray, box):
+    """Box of a round profile picture just left of a text box (e.g. the avatar next to a
+    username in a screenshotted post), or None if there isn't one."""
+    x0, y0, x1, y1 = box
+    th = max(6, y1 - y0)
+    sx0, sy0, sy1 = max(0, x0 - 5 * th), max(0, y0 - 2 * th), min(gray.shape[0], y1 + 2 * th)
+    if x0 - sx0 < th:
+        return None
+    roi = cv2.GaussianBlur(gray[sy0:sy1, sx0:x0], (3, 3), 0)
+    found = cv2.HoughCircles(roi, cv2.HOUGH_GRADIENT, dp=1, minDist=th, param1=100, param2=18,
+                             minRadius=int(th * 0.7), maxRadius=int(th * 2.2))
+    if found is None:
+        return None
+    text_cy = (y0 + y1) / 2
+    for cx, cy, r in found[0]:
+        cx, cy, r = cx + sx0, cy + sy0, r
+        # Must sit right beside the text and level with it; anything else is unrelated.
+        if 0 <= x0 - (cx + r) <= max(8, th) and abs(cy - text_cy) <= r:
+            return (int(cx - r), int(cy - r), int(cx + r), int(cy + r))
+    return None
 
 
 def drift(p_from, p_to, seconds):
