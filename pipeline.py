@@ -7,6 +7,7 @@ For each video:
      the on-screen text that stays put across frames).
   3. Cover only the caption area with white and draw the reworded caption on it,
      smaller. Protected text is never covered: caption boxes that overlap it are dropped.
+  3b. If "censor" is enabled, cover marked words, brands and logos (see censor.py).
   4. Add your watermark in a free corner that doesn't cover the source credit.
   5. Send the result to Telegram.
 
@@ -25,6 +26,8 @@ from pathlib import Path
 import imageio_ffmpeg
 import requests
 from PIL import Image, ImageDraw, ImageFont
+
+import censor  # imports pipeline back; only used at call time, so the cycle is safe
 
 log = logging.getLogger("monitor")
 BASE = Path(__file__).resolve().parent
@@ -122,9 +125,14 @@ def is_protected(text, terms):
     return any(term and term in t for term in terms)
 
 
-def analyse(frames, account, extra_terms):
-    """Return (caption_items, protected_boxes) from OCR over several frames."""
+def analyse(frames, account, extra_terms, censored=()):
+    """Return (caption_blocks, protected_boxes) from OCR over several frames.
+
+    Each caption block is a list of OCR lines that sit together (a paragraph). Lines that
+    contain a censored term are left out; the censor covers those itself.
+    """
     terms = [norm(account)] + [norm(x) for x in extra_terms]
+    censored = [norm(c) for c in censored if norm(c)]
     per_frame = [ocr_frame(f) for f in frames]
     protected = [i["box"] for items in per_frame for i in items if is_protected(i["text"], terms)]
 
@@ -133,7 +141,7 @@ def analyse(frames, account, extra_terms):
     best = max(per_frame, key=len) if per_frame else []
     caption = []
     for item in best:
-        if is_protected(item["text"], terms):
+        if is_protected(item["text"], terms) or any(c in norm(item["text"]) for c in censored):
             continue
         hits = sum(any(iou(item["box"], o["box"]) > 0.5 for o in items) for items in per_frame)
         if hits >= need:
@@ -141,8 +149,33 @@ def analyse(frames, account, extra_terms):
 
     # Never cover protected text: drop any caption line that touches it.
     caption = [c for c in caption if not any(overlaps(c["box"], p, pad=6) for p in protected)]
-    caption.sort(key=lambda c: (c["box"][1], c["box"][0]))
-    return caption, protected
+    return caption_blocks(caption), protected
+
+
+def caption_blocks(items, min_words=3):
+    """Group caption lines into paragraphs: lines stacked close together that overlap sideways.
+
+    Blocks with fewer than `min_words` words are dropped. Those are usually signs, banners
+    or UI labels inside the video ("COMM", "X.com"), not a caption.
+    """
+    blocks = []
+    for it in sorted(items, key=lambda c: (c["box"][1], c["box"][0])):
+        x0, y0, x1, y1 = it["box"]
+        line_h = y1 - y0
+        for b in blocks:
+            last = b[-1]["box"]
+            gap = y0 - last[3]
+            sideways = min(x1, last[2]) - max(x0, last[0]) > 0
+            if -line_h <= gap <= 0.8 * line_h and sideways:
+                b.append(it)
+                break
+        else:
+            blocks.append([it])
+    return [b for b in blocks if sum(len(i["text"].split()) for i in b) >= min_words]
+
+
+def block_text(block):
+    return " ".join(i["text"] for i in sorted(block, key=lambda c: (c["box"][1], c["box"][0])))
 
 
 # ---------------------------------------------------------------- rewording
@@ -218,28 +251,31 @@ def pick_corner(w, h, mw, mh, avoid):
     return corners[0]
 
 
-def build_overlay(size, caption, new_text, protected, s, out_png):
+def build_overlay(size, blocks, new_texts, protected, s, out_png):
+    """Cover each caption block with a tight box and draw its new text there.
+
+    Only the text lines themselves are covered (plus a few pixels), never the space
+    between separate blocks, so the video between them stays visible.
+    """
     w, h = size
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     avoid = list(protected)
 
-    if caption:
-        x0 = min(c["box"][0] for c in caption); y0 = min(c["box"][1] for c in caption)
-        x1 = max(c["box"][2] for c in caption); y1 = max(c["box"][3] for c in caption)
-        pad = 8
+    for block, new_text in zip(blocks, new_texts):
+        x0 = min(c["box"][0] for c in block); y0 = min(c["box"][1] for c in block)
+        x1 = max(c["box"][2] for c in block); y1 = max(c["box"][3] for c in block)
+        pad = max(2, int((y1 - y0) / len(block) * 0.2))
         cover = (max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad))
         if any(overlaps(cover, p) for p in protected):
             cover = (x0, y0, x1, y1)  # tighter box if the padding would touch the credit
         d.rectangle(cover, fill=s["cover_color"])
-        orig_line_h = sum(c["box"][3] - c["box"][1] for c in caption) / len(caption)
-        bw, bh = cover[2] - cover[0] - 2 * pad, cover[3] - cover[1] - 2 * pad
+        orig_line_h = sum(c["box"][3] - c["box"][1] for c in block) / len(block)
+        bw, bh = cover[2] - cover[0] - 2 * pad, cover[3] - cover[1]
         font, lines, line_h = fit_text(d, new_text, s["font_file"], orig_line_h * s["caption_scale"], bw, bh)
         top = cover[1] + (cover[3] - cover[1] - line_h * len(lines)) // 2
         for i, line in enumerate(lines):
-            lw = d.textlength(line, font=font)
-            d.text((cover[0] + (cover[2] - cover[0] - lw) / 2, top + i * line_h), line,
-                   font=font, fill=s["caption_color"])
+            d.text((cover[0] + pad, top + i * line_h), line, font=font, fill=s["caption_color"])
         avoid.append(cover)
 
     alpha = int(255 * s["watermark_opacity"])
@@ -259,9 +295,12 @@ def build_overlay(size, caption, new_text, protected, s, out_png):
     img.save(out_png)
 
 
-def render(video, overlay_png, out):
-    subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(video), "-i", str(overlay_png),
-                    "-filter_complex", "[0:v][1:v]overlay=0:0", "-c:v", "libx264", "-preset", "veryfast",
+def render(video, overlay_png, out, censor_graph=None):
+    """Apply the censor regions (if any) to the video, then the caption/watermark overlay."""
+    extra, chain, label = censor_graph or ([], "", "0:v")
+    graph = (chain + ";" if chain else "") + f"[{label}][1:v]overlay=0:0"
+    subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(video), "-i", str(overlay_png), *extra,
+                    "-filter_complex", graph, "-c:v", "libx264", "-preset", "veryfast",
                     "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
                     str(out)], check=True)
 
@@ -297,18 +336,28 @@ def process_video(video, account, cfg, post_caption="", send=True):
 
     with tempfile.TemporaryDirectory() as tmp:
         frames = sample_frames(video, s["sample_frames"], tmp)
-        caption, protected = analyse(frames, account, s["protected_terms"])
-        old_text = " ".join(c["text"] for c in caption)
-        new_text = reword(old_text, s["reword"]) if old_text else ""
-        log.info("[%s] %s: caption %r -> %r (%d protected text box(es) kept)",
-                 account, video.name, old_text, new_text, len(protected))
+        blocks, protected = analyse(frames, account, s["protected_terms"], censor.active_terms(cfg, account))
+        new_texts = []
+        for b in blocks:
+            old = block_text(b)
+            new = censor.censor_text(reword(old, s["reword"]), cfg, account)
+            log.info("[%s] %s: caption %r -> %r", account, video.name, old, new)
+            new_texts.append(new)
+        new_text = " ".join(new_texts)
+        log.info("[%s] %s: %d caption block(s), %d protected text box(es) kept",
+                 account, video.name, len(blocks), len(protected))
+        regions = censor.find(video, account, cfg, tmp)
+        for r in regions:
+            log.info("[%s] censor %s %r at %s, %.1fs-%.1fs", account, r["kind"], r["label"],
+                     r["box"], r["start"], r["end"])
         overlay = Path(tmp) / "overlay.png"
-        build_overlay(video_size(video), caption, new_text, protected, s, overlay)
-        render(video, overlay, out)
+        build_overlay(video_size(video), blocks, new_texts, protected, s, overlay)
+        render(video, overlay, out, censor.ffmpeg_graph(regions, cfg, tmp, first_input=2))
 
     if send and s["send_to_telegram"]:
-        text = reword(post_caption, s["reword"]) if post_caption else new_text
-        text = f"{text}\n\nSource: @{account}".strip()
+        text = censor.censor_text(reword(post_caption, s["reword"]) if post_caption else new_text, cfg, account)
+        if not censor.credit_removal_allowed(cfg, account):
+            text = f"{text}\n\nSource: @{account}".strip()
         if send_telegram(out, text):
             log.info("[%s] sent %s to Telegram", account, out.name)
     return out
@@ -330,8 +379,10 @@ def process_post(post_files, account, cfg):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s %(message)s")
-    if len(sys.argv) < 3:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if len(args) < 2:
         print(__doc__)
+        print("Missing the source account, e.g.:  python pipeline.py test\\myvideo.mp4 umbra_hq --no-send")
         sys.exit(1)
     cfg = json.loads((BASE / "config.json").read_text(encoding="utf-8"))
-    print(process_video(sys.argv[1], sys.argv[2].lstrip("@"), cfg, send="--no-send" not in sys.argv))
+    print(process_video(args[0], args[1].lstrip("@"), cfg, send="--no-send" not in sys.argv))

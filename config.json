@@ -27,5 +27,35 @@
       "umbra_hq"
     ],
     "send_to_telegram": true
+  },
+  "censor": {
+    "enabled": true,
+    "words": [
+      "GossipMillNaija",
+      "yabaleftonline",
+      "instablog9ja",
+      "umbra_hq",
+      "use code"
+    ],
+    "brands": [
+      "GossipMillNaija",
+      "yabaleftonline",
+      "instablog9ja",
+      "umbra_hq",
+      "betway"
+    ],
+    "logos_dir": "censor/logos",
+    "replacements": {},
+    "default_replacement": "censor/replacements/WhatsApp Image 2026-11-21 at 22.32.34.jpeg",
+    "fallback": "fill",
+    "caption_mask": "",
+    "fuzzy": 0.85,
+    "logo_min_matches": 12,
+    "credit_removal_allowed": [
+      "GossipMillNaija",
+      "yabaleftonline",
+      "instablog9ja",
+      "umbra_hq"
+    ]
   }
 }
