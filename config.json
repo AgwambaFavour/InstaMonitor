@@ -48,6 +48,8 @@
     "replacements": {},
     "default_replacement": "censor/replacements/WhatsApp Image 2026-11-21 at 22.32.34.jpeg",
     "fallback": "fill",
+    "fill_only": ["betway", "use code"],
+    "text_replacement": "Manny",
     "caption_mask": "",
     "fuzzy": 0.85,
     "logo_min_matches": 12,

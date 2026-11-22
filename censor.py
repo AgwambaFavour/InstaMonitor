@@ -31,7 +31,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import pipeline
 
@@ -48,6 +48,9 @@ DEFAULTS = {
     "fallback": "fill",             # "fill" (fill_color) or "box" (box_color) when no replacement image is available
     "box_color": "black",
     "fill_color": "white",          # colour painted over each hit, under any replacement image
+    "fill_only": [],                # terms that only get the fill, never an image or text
+    "text_replacement": "",         # text written over a matched name that has no profile picture beside it
+    "text_color": "black",
     "caption_mask": "",             # replacement text in captions; "" -> asterisks of same length
     "fuzzy": 0.85,                  # 0-1, how close OCR text must be to a term
     "logo_min_matches": 12,         # SIFT inliers needed to accept a logo hit
@@ -315,14 +318,16 @@ def find(video, account, cfg, workdir):
             if gray is not None and h["kind"] == "text":
                 av = avatar_beside(gray, h["box"])
                 if av:
-                    h = dict(h, box=union(h["box"], av))
+                    h = dict(h, box=union(h["box"], av), avatar=True)
             for tr in tracks:
                 lt, lb = tr["pts"][-1]
                 if tr["label"] == h["label"] and lt < t and t - lt <= step * 1.6 and near(lb, h["box"]):
                     tr["pts"].append((t, h["box"]))
+                    tr["avatar"] |= h.get("avatar", False)
                     break
             else:
-                tracks.append({"label": h["label"], "kind": h["kind"], "pts": [(t, h["box"])]})
+                tracks.append({"label": h["label"], "kind": h["kind"], "pts": [(t, h["box"])],
+                               "avatar": h.get("avatar", False)})
 
     # Turn each track into short timed boxes. Between two samples the box is the union of
     # both positions, so a moving logo stays covered without blanking its whole path.
@@ -345,7 +350,8 @@ def find(video, account, cfg, workdir):
                 merged[-1]["end"] = end
                 merged[-1]["box"] = union(merged[-1]["box"], box)
             else:
-                merged.append({"label": tr["label"], "kind": tr["kind"], "box": box, "start": start, "end": end})
+                merged.append({"label": tr["label"], "kind": tr["kind"], "box": box, "start": start, "end": end,
+                               "avatar": tr["avatar"]})
         regions += merged
     for r in regions:
         x0, y0, x1, y1 = r["box"]
@@ -422,6 +428,21 @@ def fit_image(path, bw, bh, out_png):
     canvas.save(out_png)
 
 
+def fit_label(text, font_file, color, bw, bh, out_png):
+    """Write `text` as large as fits inside bw x bh, centred on a transparent canvas."""
+    canvas = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(canvas)
+    size = bh
+    while True:
+        font = ImageFont.truetype(font_file, max(6, size))
+        l, t, r, b = d.textbbox((0, 0), text, font=font)
+        if (r - l <= bw * 0.92 and b - t <= bh * 0.8) or size <= 6:
+            break
+        size -= 1
+    d.text(((bw - (r - l)) / 2 - l, (bh - (b - t)) / 2 - t), text, font=font, fill=color)
+    canvas.save(out_png)
+
+
 def ffmpeg_graph(regions, cfg, workdir, first_input=1):
     """Build the ffmpeg pieces that apply the regions to input [0:v].
 
@@ -449,17 +470,25 @@ def ffmpeg_graph(regions, cfg, workdir, first_input=1):
         # Even sizes keep yuv420p happy.
         bw, bh = max(2, (x1 - x0) // 2 * 2), max(2, (y1 - y0) // 2 * 2)
         when = f"enable='between(t,{r['start']:.2f},{r['end']:.2f})'"
-        rep = replacement_for(r["label"], s)
+        png = Path(workdir) / f"rep_{i}.png"
+        if pipeline.norm(r["label"]) in {pipeline.norm(t) for t in s["fill_only"]}:
+            rep = ""                                     # just the white fill
+        elif r["kind"] == "text" and not r.get("avatar") and s["text_replacement"]:
+            rep = "text"                                 # a bare name: write the text instead
+        else:
+            rep = replacement_for(r["label"], s)
         color = s["box_color"] if s["fallback"] == "box" and not rep else s["fill_color"]
         fills.append(f"drawbox=x={x0}:y={y0}:w={bw}:h={bh}:color={color}:t=fill:{when}")
         if not rep:
             continue
-        rep_path = Path(rep) if Path(rep).is_absolute() else pipeline.BASE / rep
-        if not rep_path.is_file():
-            log.warning("Censor: replacement image %s not found; filling %r instead", rep_path, r["label"])
-            continue
-        png = Path(workdir) / f"rep_{i}.png"
-        fit_image(rep_path, bw, bh, png)
+        if rep == "text":
+            fit_label(s["text_replacement"], pipeline.settings(cfg)["font_file"], s["text_color"], bw, bh, png)
+        else:
+            rep_path = Path(rep) if Path(rep).is_absolute() else pipeline.BASE / rep
+            if not rep_path.is_file():
+                log.warning("Censor: replacement image %s not found; filling %r instead", rep_path, r["label"])
+                continue
+            fit_image(rep_path, bw, bh, png)
         inputs += ["-i", str(png)]
         overlays.append((idx, x0, y0, when))
         idx += 1
